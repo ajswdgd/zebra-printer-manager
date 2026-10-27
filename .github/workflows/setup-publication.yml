@@ -1,0 +1,75 @@
+name: Import Zebra Printer Manager source
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  import:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require the publishing secret
+        env:
+          PUBLISH_TOKEN: ${{ secrets.REPOSITORY_PUBLISH_TOKEN }}
+        run: |
+          python3 - <<'PY'
+          import os
+          assert os.environ.get('PUBLISH_TOKEN'), 'Add REPOSITORY_PUBLISH_TOKEN in this repository Actions secrets. Never paste a token into a source file.'
+          PY
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.REPOSITORY_PUBLISH_TOKEN }}
+          ref: ${{ github.event.repository.default_branch }}
+      - name: Verify and unpack this exact reviewed archive
+        env:
+          EXPECTED_REPOSITORY: ajswdgd/zebra-printer-manager
+          SOURCE_ARCHIVE: zebra-printer-manager-0.2.1-repository.zip
+          SOURCE_SHA256: 4a01c2416fb08747f110176e67da49295817f5577f437af510b5a45114d9d859
+          APP_MARKER: lprint/config.yaml
+          IS_PRIVATE: ${{ github.event.repository.private }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, stat, zipfile
+          root = pathlib.Path.cwd().resolve()
+          assert os.environ['GITHUB_REPOSITORY'] == os.environ['EXPECTED_REPOSITORY'], 'This importer is for the named ajswdgd repository only'
+          assert os.environ['IS_PRIVATE'] == 'false', 'Create a public repository'
+          assert not (root / os.environ['APP_MARKER']).exists(), 'Existing application source detected. Do not replay an older snapshot over an installed repository; use normal validation and release workflows.'
+          source = root / os.environ['SOURCE_ARCHIVE']
+          assert source.is_file(), 'Upload the supplied repository ZIP unchanged to this repository root first'
+          assert hashlib.sha256(source.read_bytes()).hexdigest() == os.environ['SOURCE_SHA256'], 'ZIP checksum mismatch; use the matching ZIP/importer pair'
+          with zipfile.ZipFile(source) as archive:
+              assert archive.testzip() is None
+              assert sum(i.file_size for i in archive.infolist()) <= 50 * 1024 * 1024, 'Uncompressed archive too large'
+              names = set()
+              for item in archive.infolist():
+                  path = pathlib.PurePosixPath(item.filename)
+                  assert not path.is_absolute() and '..' not in path.parts and chr(92) not in item.filename
+                  assert not {'.git', '.venv', 'node_modules', '__pycache__'}.intersection(path.parts)
+                  assert item.filename not in names, 'Duplicate path'
+                  assert item.filename != '.github/workflows/setup-publication.yml', 'Importer cannot overwrite itself'
+                  assert not stat.S_ISLNK(item.external_attr >> 16), 'No symlink members'
+                  destination = (root / path).resolve()
+                  assert destination.is_relative_to(root), 'Existing symlink would escape repository'
+                  names.add(item.filename)
+              archive.extractall(root)
+              for item in archive.infolist():
+                  if not item.is_dir():
+                      (root / item.filename).chmod(0o755 if (item.external_attr >> 16) & 0o111 else 0o644)
+          assert (root / os.environ['APP_MARKER']).is_file(), 'Wrong repository layout'
+          (root / 'IMPORT-PROVENANCE.json').write_text(json.dumps({
+              'source_archive': source.name, 'sha256': os.environ['SOURCE_SHA256'],
+              'repository': os.environ['EXPECTED_REPOSITORY'],
+              'github_validation': 'check the subsequent workflow runs; not certified by import'}, indent=2) + '\n')
+          source.unlink()
+          PY
+      - name: Commit source and retained tests
+        env:
+          PUBLISH_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'Import reviewed Zebra Printer Manager repository source'
+          git push origin "HEAD:$PUBLISH_BRANCH"
+      - name: Next step
+        run: |
+          printf '%s\n' 'Source imported. Open Actions and wait for the new validation workflows to pass. Import success alone does not certify Home Assistant installation.' >> "$GITHUB_STEP_SUMMARY"
